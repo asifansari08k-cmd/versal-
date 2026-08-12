@@ -1,2 +1,12 @@
+[project]
+name = "magma-vercel-proxy"
+version = "1.0.0"
+description = "MAGMA API permanent proxy"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115.0",
+    "httpx>=0.28.0"
+]
+
 [tool.vercel]
 entrypoint = "path:app"
