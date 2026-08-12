@@ -1,31 +1,32 @@
+from fastapi import FastAPI, Request
+from fastapi.responses import Response
+import httpx
 import json
-import os
 import time
-import urllib.error
-import urllib.request
-from http.server import BaseHTTPRequestHandler
 
+app = FastAPI()
 
-# GitHub raw file containing the current Ngrok URL
 BACKEND_URL_FILE = (
     "https://raw.githubusercontent.com/"
     "themagmalord333-oss/MAGMA-API/main/backend-url.json"
 )
 
 
-def get_backend_url():
+async def get_backend_url():
     url = f"{BACKEND_URL_FILE}?t={time.time_ns()}"
 
-    request = urllib.request.Request(
-        url,
-        headers={
-            "Cache-Control": "no-cache",
-            "User-Agent": "MAGMA-API-Proxy"
-        }
-    )
+    async with httpx.AsyncClient(timeout=10) as client:
+        response = await client.get(
+            url,
+            headers={
+                "Cache-Control": "no-cache",
+                "User-Agent": "MAGMA-Vercel-Proxy"
+            }
+        )
 
-    with urllib.request.urlopen(request, timeout=10) as response:
-        data = json.loads(response.read().decode("utf-8"))
+        response.raise_for_status()
+
+        data = response.json()
 
     backend = data.get("url", "").strip().rstrip("/")
 
@@ -35,154 +36,73 @@ def get_backend_url():
     return backend
 
 
-class handler(BaseHTTPRequestHandler):
+@app.api_route(
+    "/{path:path}",
+    methods=[
+        "GET",
+        "POST",
+        "PUT",
+        "PATCH",
+        "DELETE",
+        "OPTIONS",
+        "HEAD"
+    ]
+)
+async def proxy(request: Request, path: str):
 
-    def _proxy(self):
-        try:
-            backend = get_backend_url()
+    try:
+        backend = await get_backend_url()
 
-            # Forward the complete request path and query string
-            target_url = backend + self.path
+        target_url = backend + "/" + path
 
-            body = None
+        if request.url.query:
+            target_url += "?" + str(request.url.query)
 
-            content_length = self.headers.get("Content-Length")
+        body = await request.body()
 
-            if content_length:
-                body = self.rfile.read(int(content_length))
+        headers = dict(request.headers)
 
-            headers = {}
+        headers.pop("host", None)
+        headers.pop("content-length", None)
 
-            for key, value in self.headers.items():
-                if key.lower() not in {
-                    "host",
-                    "content-length",
-                    "connection",
-                }:
-                    headers[key] = value
+        async with httpx.AsyncClient(
+            timeout=50,
+            follow_redirects=True
+        ) as client:
 
-            request = urllib.request.Request(
-                target_url,
-                data=body,
-                headers=headers,
-                method=self.command,
+            response = await client.request(
+                method=request.method,
+                url=target_url,
+                content=body,
+                headers=headers
             )
 
-            with urllib.request.urlopen(request, timeout=50) as response:
+        excluded_headers = {
+            "content-length",
+            "transfer-encoding",
+            "connection",
+            "content-encoding"
+        }
 
-                response_body = response.read()
+        response_headers = {
+            key: value
+            for key, value in response.headers.items()
+            if key.lower() not in excluded_headers
+        }
 
-                self.send_response(response.status)
+        response_headers["Access-Control-Allow-Origin"] = "*"
 
-                content_type = response.headers.get(
-                    "Content-Type",
-                    "application/json"
-                )
-
-                self.send_header(
-                    "Content-Type",
-                    content_type
-                )
-
-                self.send_header(
-                    "Access-Control-Allow-Origin",
-                    "*"
-                )
-
-                self.send_header(
-                    "Access-Control-Allow-Methods",
-                    "GET,POST,PUT,PATCH,DELETE,OPTIONS"
-                )
-
-                self.send_header(
-                    "Access-Control-Allow-Headers",
-                    "*"
-                )
-
-                self.end_headers()
-
-                self.wfile.write(response_body)
-
-        except urllib.error.HTTPError as e:
-
-            error_body = e.read()
-
-            self.send_response(e.code)
-
-            self.send_header(
-                "Content-Type",
-                e.headers.get(
-                    "Content-Type",
-                    "application/json"
-                )
-            )
-
-            self.send_header(
-                "Access-Control-Allow-Origin",
-                "*"
-            )
-
-            self.end_headers()
-
-            self.wfile.write(error_body)
-
-        except Exception as e:
-
-            self.send_response(502)
-
-            self.send_header(
-                "Content-Type",
-                "application/json"
-            )
-
-            self.send_header(
-                "Access-Control-Allow-Origin",
-                "*"
-            )
-
-            self.end_headers()
-
-            response = {
-                "status": False,
-                "error": "Backend unavailable",
-                "message": str(e),
-            }
-
-            self.wfile.write(
-                json.dumps(response).encode("utf-8")
-            )
-
-    def do_GET(self):
-        self._proxy()
-
-    def do_POST(self):
-        self._proxy()
-
-    def do_PUT(self):
-        self._proxy()
-
-    def do_PATCH(self):
-        self._proxy()
-
-    def do_DELETE(self):
-        self._proxy()
-
-    def do_OPTIONS(self):
-        self.send_response(204)
-
-        self.send_header(
-            "Access-Control-Allow-Origin",
-            "*"
+        return Response(
+            content=response.content,
+            status_code=response.status_code,
+            headers=response_headers,
+            media_type=response.headers.get("content-type")
         )
 
-        self.send_header(
-            "Access-Control-Allow-Methods",
-            "GET,POST,PUT,PATCH,DELETE,OPTIONS"
-        )
+    except Exception as e:
 
-        self.send_header(
-            "Access-Control-Allow-Headers",
-            "*"
-        )
-
-        self.end_headers()
+        return {
+            "status": False,
+            "error": "Backend unavailable",
+            "message": str(e)
+        }
